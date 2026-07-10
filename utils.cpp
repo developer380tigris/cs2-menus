@@ -83,6 +83,21 @@ std::vector<std::string> g_vCommandEater;
 
 int g_iOnTakeDamageAliveId = -1;
 
+static CCSPlayer_DamageReactServices* GetDamageReactServices(CCSPlayerPawn* pPawn)
+{
+	if (!pPawn)
+		return nullptr;
+
+	static int s_damageReactOffset = -1;
+	if (s_damageReactOffset == -1)
+		s_damageReactOffset = schema::GetServerOffset("CBasePlayerPawn", "m_pDamageReactServices");
+
+	if (s_damageReactOffset <= 0)
+		return nullptr;
+
+	return *reinterpret_cast<CCSPlayer_DamageReactServices**>(reinterpret_cast<uintptr_t>(pPawn) + s_damageReactOffset);
+}
+
 SH_DECL_HOOK0_void(IServerGameDLL, GameServerSteamAPIActivated, SH_NOATTRIB, 0);
 SH_DECL_HOOK3_void(IServerGameDLL, GameFrame, SH_NOATTRIB, 0, bool, bool, bool);
 SH_DECL_HOOK2(IGameEventManager2, FireEvent, SH_NOATTRIB, 0, bool, IGameEvent*, bool);
@@ -2093,7 +2108,7 @@ void PlayersApi::EmitSound(int iSlot, CEntityIndex ent, std::string sound_name, 
 			params.m_pSoundName = sound_name.c_str();
 			params.m_flVolume = volume;
 			params.m_nPitch = pitch;
-		CSingleRecipientFilter filter(iSlot);
+		CSingleRecipientFilter filter(CPlayerSlot(iSlot));
 		UTIL_EmitSoundFilter(unk, filter, ent, params);
 	}
 }
@@ -2218,7 +2233,8 @@ void PlayersApi::TakeDamage(int iSlot, CTakeDamageInfo* pInfo, bool bHook)
 	if(!pController) return;
 	CCSPlayerPawn* pPawn = pController->GetPlayerPawn();
 	if(!pPawn) return;
-	CCSPlayer_DamageReactServices* pDamageServices = pPawn->m_pDamageReactServices();
+	CCSPlayer_DamageReactServices* pDamageServices = GetDamageReactServices(pPawn);
+	if(!pDamageServices) return;
 	if(!bHook)
 	{
 		UTIL_TakeDamage(pDamageServices, pInfo);
