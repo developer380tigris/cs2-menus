@@ -71,18 +71,17 @@ jobs:
           python3 -m pip install setuptools==45.2.0
 
       - name: Install AMBuild
-        shell: bash
         run: |
           set -euxo pipefail
 
-          git clone \
-            --depth 1 \
+          git clone --depth 1 \
             https://github.com/alliedmodders/ambuild.git \
             "${GITHUB_WORKSPACE}/ambuild"
 
           python3 -m pip install "${GITHUB_WORKSPACE}/ambuild"
 
-          ambuild --version
+          which ambuild
+          ambuild --help | head -5
 
       - name: Checkout MetaMod and HL2SDK
         shell: bash
