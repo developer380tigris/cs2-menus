@@ -68,7 +68,7 @@ public:
 
 protected:
 	NetChannelBufType_t m_nBufType;
-	CPlayerSlot m_nPredictedByPlayerSlot;
+	CPlayerSlot m_nPredictedByPlayerSlot{-1};
 	bool m_bInitMessage;
 	CPlayerBitVec m_Recipients;
 };
