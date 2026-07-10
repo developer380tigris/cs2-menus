@@ -4,78 +4,233 @@ on:
   push:
     branches:
       - main
+
   pull_request:
     branches:
       - main
+
   release:
     types:
       - created
 
 jobs:
   build:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    if: >
+      github.event_name != 'push' ||
+      !contains(github.event.head_commit.message, '[skip ci]')
+
     permissions:
       contents: write
+
     runs-on: ubuntu-latest
+
     container:
       image: ghcr.io/pisex/ubuntu20:latest
 
     env:
-      HL2SDK_ROOT: "${{ github.workspace }}/external"
-      MMS_PATH: "${{ github.workspace }}/external/metamod-source"
-      MANIFEST_PATH: "${{ github.workspace }}/external/metamod-source/hl2sdk-manifests"
+      HL2SDK_ROOT: ${{ github.workspace }}/external
+      MMS_PATH: ${{ github.workspace }}/external/metamod-source
+      MANIFEST_PATH: ${{ github.workspace }}/external/metamod-source/hl2sdk-manifests
+      SCHEMA_ENTITY_PATH: ${{ github.workspace }}/SchemaEntity
 
     steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
       - name: Generate build number
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         id: buildnumber
         uses: onyxmueller/build-tag-number@v1
         with:
-          token: ${{secrets.github_token}}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up dependencies
+      - name: Install build dependencies
+        shell: bash
         run: |
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qy
-          apt-get install -y git clang-10 clang++-10 binutils python3 python3-pip zip
+          set -euxo pipefail
 
-          python3 -m pip install --upgrade pip importlib-metadata
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update -qy
+
+          apt-get install -y \
+            git \
+            ca-certificates \
+            clang-10 \
+            binutils \
+            python3 \
+            python3-pip \
+            zip
+
+          python3 -m pip install --upgrade \
+            pip \
+            importlib-metadata
+
           python3 -m pip install setuptools==45.2.0
 
-          git clone https://github.com/alliedmodders/ambuild.git ambuild
-          cd ambuild
-          pip3 install .
-          cd ..
-
-          mkdir -p external
-          cd external
-          git clone --recursive --branch master --single-branch \
-            https://github.com/alliedmodders/metamod-source.git
-          git clone --recursive --branch cs2 --single-branch \
-            https://github.com/alliedmodders/hl2sdk.git hl2sdk-cs2
-            
-          cd ../..
-
-          git clone https://github.com/pisex/SchemaEntity.git
-          
-      - name: Configure and build plugin
+      - name: Install AMBuild
+        shell: bash
         run: |
-          mkdir build
-          cd build
-          python3 ../configure.py -s cs2 --targets x86_64 --enable-optimize --hl2sdk-manifests=./hl2sdk-manifests --mms_path=$MMS_PATH --hl2sdk-root=$HL2SDK_ROOT
+          set -euxo pipefail
+
+          git clone \
+            --depth 1 \
+            https://github.com/alliedmodders/ambuild.git \
+            "${GITHUB_WORKSPACE}/ambuild"
+
+          python3 -m pip install "${GITHUB_WORKSPACE}/ambuild"
+
+          ambuild --version
+
+      - name: Checkout MetaMod and HL2SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf "${GITHUB_WORKSPACE}/external"
+          mkdir -p "${GITHUB_WORKSPACE}/external"
+
+          git clone \
+            --recursive \
+            https://github.com/alliedmodders/metamod-source.git \
+            "${MMS_PATH}"
+
+          # MetaMod сам загружает согласованные SDK-зависимости.
+          cd "${MMS_PATH}"
+          ./support/checkout-deps.sh
+
+          test -d "${HL2SDK_ROOT}/hl2sdk-cs2"
+          test -d "${MANIFEST_PATH}"
+
+      - name: Checkout SchemaEntity
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf "${SCHEMA_ENTITY_PATH}"
+
+          git clone \
+            --depth 1 \
+            https://github.com/pisex/SchemaEntity.git \
+            "${SCHEMA_ENTITY_PATH}"
+
+      - name: Validate protobuf headers
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "HL2SDK root:"
+          find "${HL2SDK_ROOT}/hl2sdk-cs2" \
+            \( \
+              -iname 'gameevents.pb.h' \
+              -o -iname 'networkbasetypes.pb.h' \
+              -o -iname 'valvextensions.pb.h' \
+              -o -iname 'valveextensions.pb.h' \
+            \) \
+            -print
+
+          GAMEEVENTS_HEADER="$(
+            find "${HL2SDK_ROOT}/hl2sdk-cs2" \
+              -iname 'gameevents.pb.h' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "${GAMEEVENTS_HEADER}" ]; then
+            echo "::error::gameevents.pb.h was not found in HL2SDK"
+            exit 1
+          fi
+
+          NETWORK_HEADER="$(
+            find "${HL2SDK_ROOT}/hl2sdk-cs2" \
+              -iname 'networkbasetypes.pb.h' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "${NETWORK_HEADER}" ]; then
+            echo "::error::networkbasetypes.pb.h was not found in HL2SDK"
+            exit 1
+          fi
+
+          echo "References from networkbasetypes.pb.h:"
+          grep -n 'extensions\.pb\.h' "${NETWORK_HEADER}" || true
+
+          REQUIRED_EXTENSION="$(
+            sed -n 's/^#include "\(.*extensions\.pb\.h\)".*/\1/p' \
+              "${NETWORK_HEADER}" |
+            head -n 1
+          )"
+
+          if [ -n "${REQUIRED_EXTENSION}" ]; then
+            REQUIRED_EXTENSION_PATH="$(
+              find "${HL2SDK_ROOT}/hl2sdk-cs2" \
+                -name "${REQUIRED_EXTENSION}" \
+                -print \
+                -quit
+            )"
+
+            if [ -z "${REQUIRED_EXTENSION_PATH}" ]; then
+              echo "::error::Required protobuf header ${REQUIRED_EXTENSION} is absent"
+              exit 1
+            fi
+
+            echo "Found: ${REQUIRED_EXTENSION_PATH}"
+          fi
+
+      - name: Configure plugin
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf "${GITHUB_WORKSPACE}/build"
+          mkdir -p "${GITHUB_WORKSPACE}/build"
+
+          cd "${GITHUB_WORKSPACE}/build"
+
+          python3 ../configure.py \
+            -s cs2 \
+            --targets x86_64 \
+            --enable-optimize \
+            --hl2sdk-manifests="${MANIFEST_PATH}" \
+            --mms_path="${MMS_PATH}" \
+            --hl2sdk-root="${HL2SDK_ROOT}"
+
+      - name: Build plugin
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "${GITHUB_WORKSPACE}/build"
           ambuild
 
-      - name: Package addon into ZIP
+      - name: Package addon
+        shell: bash
         run: |
-          cd build/package/addons
-          zip -r "${{ github.event.repository.name }}.zip" .
-          mv "${{ github.event.repository.name }}.zip" "${GITHUB_WORKSPACE}/"
+          set -euxo pipefail
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+          PACKAGE_DIR="${GITHUB_WORKSPACE}/build/package/addons"
+          ARCHIVE="${GITHUB_WORKSPACE}/${GITHUB_REPOSITORY##*/}.zip"
+
+          test -d "${PACKAGE_DIR}"
+
+          cd "${PACKAGE_DIR}"
+          zip -r "${ARCHIVE}" .
+
+          test -s "${ARCHIVE}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.head_commit.message }}
+          name: ${{ github.event.repository.name }}
+          path: ${{ github.workspace }}/${{ github.event.repository.name }}.zip
+          if-no-files-found: error
+
+      - name: Attach archive to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
           files: ${{ github.workspace }}/${{ github.event.repository.name }}.zip
