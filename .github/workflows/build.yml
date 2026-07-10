@@ -7,10 +7,13 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:
+  release:
+    types:
+      - created
 
 jobs:
   build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -23,22 +26,21 @@ jobs:
       MANIFEST_PATH: "${{ github.workspace }}/external/metamod-source/hl2sdk-manifests"
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Generate build number
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        id: buildnumber
+        uses: onyxmueller/build-tag-number@v1
+        with:
+          token: ${{secrets.github_token}}
 
-      - name: Extract plugin version
-        id: pv
-        run: |
-          V=$(grep -oE 'GetVersion\(\) \{ return "[^"]+"' utils.cpp | grep -oE '"[^"]+"' | tr -d '"')
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "tag=v$V" >> "$GITHUB_OUTPUT"
-          echo "Plugin version: $V"
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up dependencies
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qy
-          apt-get install -y git binutils python3 python3-pip zip
+          apt-get install -y git clang-10 clang++-10 binutils python3 python3-pip zip
 
           python3 -m pip install --upgrade pip importlib-metadata
           python3 -m pip install setuptools==45.2.0
@@ -54,14 +56,11 @@ jobs:
             https://github.com/alliedmodders/metamod-source.git
           git clone --recursive --branch cs2 --single-branch \
             https://github.com/alliedmodders/hl2sdk.git hl2sdk-cs2
-
+            
           cd ../..
 
           git clone https://github.com/pisex/SchemaEntity.git
-          sed -i 's/NetworkStateChanged_t/NetworkStateChangedData/g' SchemaEntity/schemasystem.cpp
-          sed -i 's/FL_PAWN_FAKECLIENT/FL_FAKECLIENT/g' SchemaEntity/CCSPlayerPawn.h
-          sed -i 's/FL_CONTROLLER_FAKECLIENT/FL_FAKECLIENT/g' SchemaEntity/CCSPlayerController.h
-
+          
       - name: Configure and build plugin
         run: |
           mkdir build
@@ -72,33 +71,11 @@ jobs:
       - name: Package addon into ZIP
         run: |
           cd build/package/addons
-          zip -r "${{ github.event.repository.name }}-${{ steps.pv.outputs.version }}.zip" .
-          mv "${{ github.event.repository.name }}-${{ steps.pv.outputs.version }}.zip" "${GITHUB_WORKSPACE}/"
+          zip -r "${{ github.event.repository.name }}.zip" .
+          mv "${{ github.event.repository.name }}.zip" "${GITHUB_WORKSPACE}/"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
         with:
-          name: ${{ github.event.repository.name }}-${{ steps.pv.outputs.version }}
-          path: ${{ github.workspace }}/${{ github.event.repository.name }}-${{ steps.pv.outputs.version }}.zip
-
-      - name: Check if release already exists
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: release_check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "${{ steps.pv.outputs.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.pv.outputs.tag }}
-          name: ${{ steps.pv.outputs.tag }}
-          files: ${{ github.workspace }}/${{ github.event.repository.name }}-${{ steps.pv.outputs.version }}.zip
-          generate_release_notes: true
-          make_latest: "true"
+          tag_name: ${{ github.event.head_commit.message }}
+          files: ${{ github.workspace }}/${{ github.event.repository.name }}.zip
